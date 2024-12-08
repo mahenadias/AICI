@@ -4,21 +4,13 @@ import time
 from datetime import datetime
 
 import cv2
+import dlib  # Untuk mendeteksi facial landmarks
 import numpy as np
 import pandas as pd
 import streamlit as st
 from keras.models import load_model
 from PIL import Image  # Untuk menampilkan gambar di Streamlit
-from pymongo import MongoClient
 
-# Koneksi ke MongoDB
-uri = "mongodb+srv://ningimasaza:hsWpcl865Vwfe9H9@cluster1.csmpu.mongodb.net/?retryWrites=true&w=majority&appName=Cluster1"
-client = MongoClient(
-    uri
-)  # Ganti dengan URL MongoDB Anda jika menggunakan server berbeda
-db = client["SPK"]  # Nama database
-collection_face = db["presensi"]  # Collection untuk data face recognition
-collection_activity = db["tracking"]  # Collection untuk data aktivitas
 
 # Fungsi untuk memuat model dan data pengguna
 def load_model_and_data():
@@ -45,24 +37,13 @@ def record_attendance(name, user_id, major):
         "Waktu Kehadiran": current_time
     }])
 
-    # Simpan ke MongoDB
-    record = {
-        "nama": name,
-        "nim": user_id,
-        "prodi": major,
-        "waktu_kehadiran": current_time
-    }
-    collection_face.insert_one(record)
-
     df = pd.read_csv(file_path)
     df = pd.concat([df, new_data], ignore_index=True)
     df.to_csv(file_path, index=False)
-    
+
 # Fungsi untuk memprediksi wajah
 def predict_face(face, model, users, threshold=0.6):  
     face = cv2.resize(face, (64, 64))  # Sesuaikan ukuran wajah dengan model input
-    
-    # Ubah gambar menjadi grayscale jika diperlukan
     face = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
     
     face = face.astype('float32') / 255.0  # Normalisasi
@@ -86,12 +67,10 @@ def predict_face(face, model, users, threshold=0.6):
 def detect_movement(prev_frame, current_frame, threshold=1000):
     if prev_frame is None:
         return False, current_frame
-    # Hitung perbedaan antara frame sebelumnya dan sekarang
     diff = cv2.absdiff(prev_frame, current_frame)
     diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
     diff_blur = cv2.GaussianBlur(diff_gray, (5, 5), 0)
     
-    # Threshold untuk mendeteksi perubahan signifikan (gerakan)
     _, diff_thresh = cv2.threshold(diff_blur, 25, 255, cv2.THRESH_BINARY)
     
     movement_amount = np.sum(diff_thresh)
@@ -119,6 +98,10 @@ def take_attendance():
     frame_placeholder = st.empty()  # Tempatkan untuk video feed
     comment_placeholder = st.empty()  # Tempatkan untuk komentar
 
+    # Load dlib untuk mendeteksi facial landmarks
+    detector = dlib.get_frontal_face_detector()
+    predictor = dlib.shape_predictor(cv2.data.haarcascades + 'shape_predictor_68_face_landmarks.dat')
+
     # Variabel untuk mencatat kehadiran dan deteksi durasi pengenalan
     last_recorded_time = 0
     recognition_start_time = None
@@ -137,16 +120,21 @@ def take_attendance():
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-        if len(faces) == 0:
-            recognized_name = None
-            recognition_start_time = None
-            comment = "Wajah tidak dikenali."  # Reset jika tidak ada wajah
-        else:
+        # Inisialisasi default untuk variabel `comment`
+        comment = "Tidak ada wajah yang terdeteksi."
+
+        if len(faces) > 0:
             for (x, y, w, h) in faces:
                 face = frame[y:y+h, x:x+w]
 
                 # Gunakan fungsi prediksi wajah dengan threshold yang ditentukan pengguna
                 name, user_id, major, confidence = predict_face(face, model, users, threshold=threshold)
+
+                # Deteksi landmark wajah menggunakan dlib
+                faces_dlib = detector(gray)
+                for face_dlib in faces_dlib:
+                    landmarks = predictor(gray, face_dlib)
+                    landmarks_data = np.array([[p.x, p.y] for p in landmarks.parts()])
 
                 if name != "Tidak Dikenali":
                     if recognized_name == name:
@@ -166,7 +154,7 @@ def take_attendance():
 
                                 # Rekam kehadiran
                                 record_attendance(name, user_id, major)
-                                comment = f"Wajah dikenali dan kehadiran tercatat."
+                                comment = f"Wajah dikenali dan kehadiran tercatat untuk {name}."
                                 last_recorded_time = current_time  # Update waktu terakhir pencatatan
 
                             # Reset waktu pengenalan agar tidak terus menerus mencatat
@@ -181,6 +169,10 @@ def take_attendance():
                     cv2.putText(frame, f"NIM: {user_id}", (x, y-40), cv2.FONT_HERSHEY_COMPLEX, 0.6, (255, 255, 255), 1)
                     cv2.putText(frame, f"Prodi: {major}", (x, y-20), cv2.FONT_HERSHEY_COMPLEX, 0.6, (255, 255, 255), 1)
                     cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+
+                    # Cetak akurasi (confidence) ke terminal VSCode
+                    print(f"Nama: {name}, Confidence: {confidence:.2f}")
+
                 else:
                     recognized_name = None
                     recognition_start_time = None
@@ -199,7 +191,9 @@ def take_attendance():
 
     cap.release()
 
-
 # Fungsi utama untuk Streamlit
 def main():
     take_attendance()
+
+if __name__ == "__main__":
+    main()
